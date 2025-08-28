@@ -1,0 +1,108 @@
+# Deployment для веб-приложения
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  labels:
+    app: webapp
+spec:
+  replicas: 3  # Базовое количество для отказоустойчивости
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1  # Всегда минимум 2 пода в работе
+      maxSurge: 1        # Контролируем потребление ресурсов
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+    spec:
+      # Распределение по зонам для максимальной отказоустойчивости
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - webapp
+              topologyKey: topology.kubernetes.io/zone
+      containers:
+      - name: webapp
+        image: webapp:latest  # Замените на ваш образ
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: 100m      # Стабильное потребление 0.1 CPU
+            memory: 128Mi  # Стабильное потребление памяти
+          limits:
+            cpu: 500m      # Запас для инициализации и всплесков
+            memory: 256Mi  # Двойной запас для безопасности
+        # Проверка готовности с учетом времени инициализации
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10  # Учитываем 5-10 сек инициализации
+          periodSeconds: 5
+          timeoutSeconds: 3
+        # Проверка жизнеспособности
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30  # Даем время полностью запуститься
+          periodSeconds: 10
+          timeoutSeconds: 3
+---
+# Сервис для доступа к приложению
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp-service
+spec:
+  selector:
+    app: webapp
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: ClusterIP  # Или LoadBalancer если нужен внешний доступ
+---
+# Горизонтальное автомасштабирование для дневного цикла нагрузки
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: webapp-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: webapp
+  minReplicas: 3  # Минимум для отказоустойчивости
+  maxReplicas: 4  # По результатам нагрузочных тестов
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70  # Масштабирование при 70% CPU
+---
+# Политика прерывания для безопасных обновлений
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: webapp-pdb
+spec:
+  minAvailable: 2  # Минимум 2 пода всегда доступны
+  selector:
+    matchLabels:
+      app: webapp
